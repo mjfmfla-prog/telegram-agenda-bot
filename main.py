@@ -163,7 +163,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title, dt = parse(text)
 
     if not dt:
-        await update.message.reply_text("❌ Gebruik: meeting 14:00")
+        await update.message.reply_text("NEW VERSION WORKS")
         return
 
     add_event(update.effective_chat.id, title, dt)
