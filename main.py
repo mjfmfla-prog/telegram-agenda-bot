@@ -6,11 +6,7 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -96,6 +92,7 @@ def parse(text: str):
     dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=NL_TZ)
 
     title = text
+
     for d in weekdays.keys():
         title = title.replace(d, "")
 
@@ -106,6 +103,7 @@ def parse(text: str):
         title = title.replace(w, "")
 
     title = title.strip()
+
     if title == "":
         title = "event"
 
@@ -137,15 +135,10 @@ def agenda_menu():
         [InlineKeyboardButton("🗓 Month", callback_data="month")],
     ])
 
-def event_keyboard(event_id):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ Delete", callback_data=f"del_{event_id}")]
-    ])
-
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Calendar bot active")
+    await update.message.reply_text("📅 Calendar bot is active")
 
 async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Choose view:", reply_markup=agenda_menu())
@@ -153,19 +146,19 @@ async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= CALLBACKS ================= #
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    query = update.callback_query
+    await query.answer()
 
-    chat_id = q.message.chat.id
+    chat_id = query.message.chat.id
     now = datetime.now(NL_TZ)
 
-    data = q.data
+    data = query.data
 
     # DELETE EVENT
     if data.startswith("del_"):
         event_id = int(data.split("_")[1])
         delete_event(event_id)
-        await q.message.reply_text("🗑 Event deleted")
+        await query.message.reply_text("🗑 Event deleted")
         return
 
     events = get_events(chat_id)
@@ -183,25 +176,26 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = "🗓 This month"
 
     if not filtered:
-        await q.message.reply_text(f"{title}\n\nNo events")
+        await query.message.reply_text(title + "\n\nNo events")
         return
 
-    msg = f"{title}\n\n"
+    msg = title + "\n\n"
 
     for e in filtered:
         dt = datetime.fromisoformat(e[3])
 
-        msg += (
-            f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
-            f"🆔 /delete {e[0]}\n\n"
-        )
+        line = "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
+        line += "🆔 /delete " + str(e[0]) + "\n\n"
 
-    await q.message.reply_text(msg)
+        msg += line
+
+    await query.message.reply_text(msg)
 
 # ================= MESSAGE ================= #
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+
     title, dt = parse(text)
 
     if not dt:
@@ -210,10 +204,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_event(update.effective_chat.id, title, dt)
 
-    await update.message.reply_text(
-        f"✅ Added\n📌 {title}\n🕒 {dt.strftime('%A %d %B %H:%M')}",
-        reply_markup=event_keyboard(1)
+    msg = (
+        "✅ Added\n"
+        "📌 " + title + "\n"
+        "🕒 " + dt.strftime("%A %d %B %H:%M")
     )
+
+    await update.message.reply_text(msg)
 
 # ================= REMINDERS ================= #
 
@@ -234,4 +231,23 @@ def reminder_loop(app):
                 try:
                     app.bot.send_message(
                         chat_id=e[1],
-                        text=f"🔔 Reminder\n📌
+                        text="🔔 Reminder\n📌 " + e[2] + "\n🕒 " + dt.strftime("%H:%M")
+                    )
+
+                    cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
+                    conn.commit()
+
+                except:
+                    pass
+
+        time.sleep(30)
+
+# ================= MORNING ================= #
+
+def morning_loop(app):
+    sent = set()
+
+    while True:
+        now = datetime.now(NL_TZ)
+
+        if now.hour == 8 and now
