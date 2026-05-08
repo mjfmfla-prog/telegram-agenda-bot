@@ -55,32 +55,201 @@ CREATE TABLE IF NOT EXISTS events (
 
 conn.commit()
 
-# ================= PARSER ================= #
+# ================= SMART PARSER ================= #
 
 def parse(text: str):
+
     text = text.lower().strip()
 
     now = datetime.now(NL_TZ)
 
-    # Zoek tijd
+    # ================= MONTHS ================= #
+
+    months = {
+        "januari": 1,
+        "februari": 2,
+        "maart": 3,
+        "april": 4,
+        "mei": 5,
+        "juni": 6,
+        "juli": 7,
+        "augustus": 8,
+        "september": 9,
+        "oktober": 10,
+        "november": 11,
+        "december": 12,
+
+        "january": 1,
+        "february": 2,
+        "march": 3,
+        "april": 4,
+        "may": 5,
+        "june": 6,
+        "july": 7,
+        "august": 8,
+        "september": 9,
+        "october": 10,
+        "november": 11,
+        "december": 12,
+    }
+
+    # ================= WEEKDAYS ================= #
+
+    weekdays = {
+        "maandag": 0,
+        "dinsdag": 1,
+        "woensdag": 2,
+        "donderdag": 3,
+        "vrijdag": 4,
+        "zaterdag": 5,
+        "zondag": 6,
+
+        "monday": 0,
+        "tuesday": 1,
+        "wednesday": 2,
+        "thursday": 3,
+        "friday": 4,
+        "saturday": 5,
+        "sunday": 6,
+    }
+
+    # ================= TIME ================= #
+
+    hour = None
+    minute = 0
+
+    # 18:30
     match = re.search(r"(\d{1,2}):(\d{2})", text)
 
-    if not match:
-        return None, None
-
-    try:
+    if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
-    except:
+
+    # 3 uur
+    if hour is None:
+
+        match = re.search(r"(\d{1,2})\s*uur", text)
+
+        if match:
+            hour = int(match.group(1))
+            minute = 0
+
+    # half 3
+    if hour is None:
+
+        match = re.search(r"half\s+(\d{1,2})", text)
+
+        if match:
+            hour = int(match.group(1)) - 1
+            minute = 30
+
+    # kwart voor 4
+    if hour is None:
+
+        match = re.search(r"kwart\s+voor\s+(\d{1,2})", text)
+
+        if match:
+            hour = int(match.group(1)) - 1
+            minute = 45
+
+    # kwart over 5
+    if hour is None:
+
+        match = re.search(r"kwart\s+over\s+(\d{1,2})", text)
+
+        if match:
+            hour = int(match.group(1))
+            minute = 15
+
+    # middag / avond
+    if "middag" in text and hour is not None:
+        if hour < 12:
+            hour += 12
+
+    if "avond" in text and hour is not None:
+        if hour < 12:
+            hour += 12
+
+    # Geen tijd
+    if hour is None:
         return None, None
 
-    # Datum bepalen
+    # ================= DATE ================= #
+
     event_date = now.date()
 
-    if "tomorrow" in text:
+    # morgen
+    if "morgen" in text or "tomorrow" in text:
         event_date = (now + timedelta(days=1)).date()
 
-    # Datetime maken
+    # overmorgen
+    elif "overmorgen" in text:
+        event_date = (now + timedelta(days=2)).date()
+
+    # weekdays
+    else:
+
+        found_weekday = False
+
+        for day, weekday_num in weekdays.items():
+
+            if day in text:
+
+                current_weekday = now.weekday()
+
+                days_ahead = weekday_num - current_weekday
+
+                if days_ahead <= 0:
+                    days_ahead += 7
+
+                event_date = (
+                    now + timedelta(days=days_ahead)
+                ).date()
+
+                found_weekday = True
+
+                break
+
+        # 12 mei
+        if not found_weekday:
+
+            for month_name, month_num in months.items():
+
+                pattern = rf"(\d{{1,2}})\s+{month_name}"
+
+                match = re.search(pattern, text)
+
+                if match:
+
+                    day_num = int(match.group(1))
+
+                    year = now.year
+
+                    try:
+
+                        possible_date = datetime(
+                            year,
+                            month_num,
+                            day_num
+                        ).date()
+
+                        # volgend jaar als datum al voorbij is
+                        if possible_date < now.date():
+                            possible_date = datetime(
+                                year + 1,
+                                month_num,
+                                day_num
+                            ).date()
+
+                        event_date = possible_date
+
+                    except:
+                        pass
+
+                    break
+
+    # ================= DATETIME ================= #
+
     dt = datetime(
         year=event_date.year,
         month=event_date.month,
@@ -90,11 +259,57 @@ def parse(text: str):
         tzinfo=NL_TZ
     )
 
-    # Titel schoonmaken
-    title = re.sub(r"\d{1,2}:\d{2}", "", text)
-    title = title.replace("tomorrow", "")
-    title = title.replace("today", "")
-    title = title.strip()
+    # ================= TITLE CLEANUP ================= #
+
+    title = text
+
+    patterns = [
+        r"\d{1,2}:\d{2}",
+        r"\d{1,2}\s*uur",
+        r"half\s+\d{1,2}",
+        r"kwart\s+voor\s+\d{1,2}",
+        r"kwart\s+over\s+\d{1,2}",
+    ]
+
+    for p in patterns:
+        title = re.sub(p, "", title)
+
+    remove_words = [
+        "morgen",
+        "overmorgen",
+        "today",
+        "tomorrow",
+        "middag",
+        "avond",
+
+        "maandag",
+        "dinsdag",
+        "woensdag",
+        "donderdag",
+        "vrijdag",
+        "zaterdag",
+        "zondag",
+
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+
+    for w in remove_words:
+        title = title.replace(w, "")
+
+    # maandnamen verwijderen
+    for month_name in months.keys():
+        title = title.replace(month_name, "")
+
+    # losse nummers verwijderen
+    title = re.sub(r"\b\d{1,2}\b", "", title)
+
+    title = re.sub(r"\s+", " ", title).strip()
 
     if title == "":
         title = "event"
@@ -104,29 +319,36 @@ def parse(text: str):
 # ================= DATABASE HELPERS ================= #
 
 def add_event(chat_id, title, dt):
+
     cursor.execute(
         "INSERT INTO events (chat_id, title, event_time) VALUES (?, ?, ?)",
         (chat_id, title, dt.isoformat()),
     )
+
     conn.commit()
 
 def get_events(chat_id):
+
     cursor.execute(
         "SELECT * FROM events WHERE chat_id=? ORDER BY event_time",
         (chat_id,),
     )
+
     return cursor.fetchall()
 
 def delete_event(event_id):
+
     cursor.execute(
         "DELETE FROM events WHERE id=?",
         (event_id,),
     )
+
     conn.commit()
 
 # ================= MENU ================= #
 
 def menu_keyboard():
+
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📅 Vandaag", callback_data="today")],
         [InlineKeyboardButton("📆 Deze week", callback_data="week")]
@@ -135,12 +357,14 @@ def menu_keyboard():
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     await update.message.reply_text(
         "📅 Agenda bot actief",
         reply_markup=menu_keyboard()
     )
 
 async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     chat_id = update.effective_chat.id
 
     now = datetime.now(NL_TZ)
@@ -159,6 +383,7 @@ async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "📅 Vandaag:\n\n"
 
     for e in today_events:
+
         dt = datetime.fromisoformat(e[3])
 
         msg += f"{e[0]} - {e[2]} → {dt.strftime('%H:%M')}\n"
@@ -166,6 +391,7 @@ async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     chat_id = update.effective_chat.id
 
     now = datetime.now(NL_TZ)
@@ -186,6 +412,7 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = "📆 Deze week:\n\n"
 
     for e in week_events:
+
         dt = datetime.fromisoformat(e[3])
 
         msg += f"{e[0]} - {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
@@ -193,7 +420,9 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     try:
+
         event_id = int(context.args[0])
 
         delete_event(event_id)
@@ -206,6 +435,7 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= BUTTONS ================= #
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
 
     await query.answer()
@@ -243,6 +473,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"{title}:\n\n"
 
     for e in filtered:
+
         dt = datetime.fromisoformat(e[3])
 
         msg += f"{e[0]} - {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
@@ -252,20 +483,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MESSAGE HANDLER ================= #
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
 
-    print("TEXT:", text)
+    text = update.message.text
 
     title, dt = parse(text)
 
-    print("PARSED:", title, dt)
-
     if not dt:
+
         await update.message.reply_text(
-            "❌ Gebruik bijvoorbeeld:\n"
-            "meeting 14:00\n"
-            "dentist tomorrow 09:30"
+            "❌ Voorbeelden:\n\n"
+            "morgen 3 uur tandarts\n"
+            "vrijdag lunch 13:00\n"
+            "12 mei vakantie 08:00\n"
+            "overmorgen gym 18:00"
         )
+
         return
 
     add_event(update.effective_chat.id, title, dt)
@@ -273,12 +505,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Toegevoegd:\n"
         f"{title}\n"
-        f"🕒 {dt.strftime('%d-%m %H:%M')}"
+        f"🕒 {dt.strftime('%d-%m %Y %H:%M')}"
     )
 
 # ================= REMINDERS ================= #
 
 def reminder_loop(app):
+
     while True:
 
         now = datetime.now(NL_TZ)
@@ -301,6 +534,7 @@ def reminder_loop(app):
             if now >= reminder_time:
 
                 try:
+
                     app.bot.send_message(
                         chat_id=e[1],
                         text=(
@@ -375,16 +609,13 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("agenda", agenda))
     app.add_handler(CommandHandler("week", week))
     app.add_handler(CommandHandler("delete", delete_cmd))
 
-    # Buttons
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    # Messages
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -392,7 +623,6 @@ def main():
         )
     )
 
-    # Background loops
     threading.Thread(
         target=reminder_loop,
         args=(app,),
