@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS events (
 """)
 conn.commit()
 
-# ================= DATA ================= #
+# ================= MAPS ================= #
 
 WEEKDAYS = {
     "monday": 0, "tuesday": 1, "wednesday": 2,
@@ -45,21 +45,24 @@ WEEKDAYS = {
 }
 
 MONTHS = {
+    "january": 1, "february": 2, "march": 3, "april": 4,
     "may": 5, "june": 6, "july": 7, "august": 8,
+    "september": 9, "october": 10, "november": 11, "december": 12,
     "mei": 5, "juni": 6, "juli": 7
 }
 
-# ================= EVENT FILTER ================= #
+# ================= SMART TIME ================= #
 
-def is_event(text: str) -> bool:
-    t = text.lower()
+def parse_time(raw):
+    m = re.search(r"\b(\d{1,2}):(\d{2})\b", raw)
+    if m:
+        return int(m.group(1)), int(m.group(2))
 
-    return (
-        bool(re.search(r"\d{1,2}:\d{2}", t)) or
-        bool(re.search(r"\b\d{1,2}\b", t)) or
-        any(d in t for d in WEEKDAYS) or
-        "tomorrow" in t or "morgen" in t
-    )
+    m = re.search(r"\b(\d{1,2})\b", raw)
+    if m:
+        return int(m.group(1)), 0
+
+    return 9, 0
 
 # ================= CLEAN TITLE ================= #
 
@@ -79,22 +82,7 @@ def clean_title(raw: str):
 
     return t.capitalize() if t else "Event"
 
-# ================= SMART TIME PARSER ================= #
-
-def parse_time(raw):
-    # HH:MM
-    m = re.search(r"\b(\d{1,2}):(\d{2})\b", raw)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-
-    # HH only
-    m = re.search(r"\b(\d{1,2})\b", raw)
-    if m:
-        return int(m.group(1)), 0
-
-    return 9, 0
-
-# ================= PARSER ================= #
+# ================= PARSER (FIXED DATE PRIORITY) ================= #
 
 def parse(text: str):
     raw = text.lower().strip()
@@ -102,19 +90,38 @@ def parse(text: str):
 
     hour, minute = parse_time(raw)
 
-    # ---------- DATE ----------
     event_date = None
 
-    # weekday
-    for d, idx in WEEKDAYS.items():
-        if d in raw:
-            diff = idx - now.weekday()
-            if diff <= 0:
-                diff += 7
-            event_date = (now + timedelta(days=diff)).date()
-            break
+    # -------------------------------
+    # 1. EXPLICIT DATE (HIGHEST PRIORITY)
+    # -------------------------------
+    date_match = re.search(r"(\d{1,2})\s+([a-z]+)", raw)
+    if date_match:
+        day = int(date_match.group(1))
+        month_name = date_match.group(2)
+        month = MONTHS.get(month_name)
 
-    # default today
+        if month:
+            try:
+                event_date = datetime(now.year, month, day).date()
+            except:
+                pass
+
+    # -------------------------------
+    # 2. WEEKDAY ONLY IF NO DATE
+    # -------------------------------
+    if event_date is None:
+        for d, idx in WEEKDAYS.items():
+            if d in raw:
+                diff = idx - now.weekday()
+                if diff <= 0:
+                    diff += 7
+                event_date = (now + timedelta(days=diff)).date()
+                break
+
+    # -------------------------------
+    # 3. DEFAULT TODAY
+    # -------------------------------
     if event_date is None:
         event_date = now.date()
 
@@ -146,7 +153,7 @@ def get_events(chat_id):
     cursor.execute("SELECT * FROM events WHERE chat_id=? ORDER BY event_time", (chat_id,))
     return cursor.fetchall()
 
-# ================= FORMATTER ================= #
+# ================= FORMAT ================= #
 
 def format_view(title, events):
     grouped = {}
@@ -155,11 +162,9 @@ def format_view(title, events):
         dt = datetime.fromisoformat(e[3])
         grouped.setdefault(dt.date(), []).append((e, dt))
 
-    grouped = dict(sorted(grouped.items()))
-
     msg = f"{title}\n\n"
 
-    for day, items in grouped.items():
+    for day, items in sorted(grouped.items()):
         msg += "━━━━━━━━━━━━━━\n"
         msg += f"📅 {day.strftime('%A %d %B')}\n"
         msg += "━━━━━━━━━━━━━━\n"
@@ -175,10 +180,6 @@ def format_view(title, events):
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-
-    # ignore non-events
-    if not is_event(text):
-        return
 
     title, dt = parse(text)
 
@@ -202,7 +203,6 @@ async def day(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TZ)
-
     start = now.date() - timedelta(days=now.weekday())
     end = start + timedelta(days=6)
 
@@ -218,9 +218,9 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if filtered else "No events"
     )
 
+# ➕ NEW: NEXT WEEK
 async def nextweek(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TZ)
-
     start = now.date() - timedelta(days=now.weekday()) + timedelta(days=7)
     end = start + timedelta(days=6)
 
@@ -238,7 +238,6 @@ async def nextweek(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TZ)
-
     events = get_events(update.effective_chat.id)
 
     filtered = [
@@ -264,7 +263,7 @@ async def delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
-        await update.message.reply_text("Usage: /edit <id> new text")
+        await update.message.reply_text("Usage: /edit <id> text")
         return
 
     event_id = int(context.args[0])
@@ -288,8 +287,6 @@ def main():
     app.add_handler(CommandHandler("edit", edit))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-
-    print("Calendar bot v2 running")
 
     app.run_webhook(
         listen="0.0.0.0",
