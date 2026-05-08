@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS events (
 """)
 conn.commit()
 
-# ================= MAPS ================= #
+# ================= DATA ================= #
 
 WEEKDAYS = {
     "monday": 0, "tuesday": 1, "wednesday": 2,
@@ -45,24 +45,35 @@ WEEKDAYS = {
 }
 
 MONTHS = {
-    "january": 1, "february": 2, "march": 3, "april": 4,
-    "may": 5, "june": 6, "july": 7, "august": 8,
-    "september": 9, "october": 10, "november": 11, "december": 12,
+    "may": 5, "june": 6, "july": 7,
     "mei": 5, "juni": 6, "juli": 7
 }
 
-# ================= SMART TIME ================= #
+# ================= STRONG EVENT DETECTOR ================= #
 
-def parse_time(raw):
-    m = re.search(r"\b(\d{1,2}):(\d{2})\b", raw)
-    if m:
-        return int(m.group(1)), int(m.group(2))
+def is_event(text: str) -> bool:
+    t = text.lower().strip()
 
-    m = re.search(r"\b(\d{1,2})\b", raw)
-    if m:
-        return int(m.group(1)), 0
+    # ignore very short messages
+    if len(t.split()) < 2:
+        return False
 
-    return 9, 0
+    has_time = bool(re.search(r"\b\d{1,2}(:\d{2})?\b", t))
+    has_weekday = any(d in t for d in WEEKDAYS)
+    has_date = bool(re.search(r"\b\d{1,2}\s+[a-z]+\b", t))
+
+    # must look like planning intent
+    score = 0
+    if has_time:
+        score += 1
+    if has_weekday:
+        score += 1
+    if has_date:
+        score += 1
+    if len(t.split()) >= 3:
+        score += 1
+
+    return score >= 2
 
 # ================= CLEAN TITLE ================= #
 
@@ -82,7 +93,20 @@ def clean_title(raw: str):
 
     return t.capitalize() if t else "Event"
 
-# ================= PARSER (FIXED DATE PRIORITY) ================= #
+# ================= TIME PARSER ================= #
+
+def parse_time(raw):
+    m = re.search(r"\b(\d{1,2}):(\d{2})\b", raw)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+
+    m = re.search(r"\b(\d{1,2})\b", raw)
+    if m:
+        return int(m.group(1)), 0
+
+    return 9, 0
+
+# ================= PARSER ================= #
 
 def parse(text: str):
     raw = text.lower().strip()
@@ -92,24 +116,18 @@ def parse(text: str):
 
     event_date = None
 
-    # -------------------------------
-    # 1. EXPLICIT DATE (HIGHEST PRIORITY)
-    # -------------------------------
+    # 1. explicit date (priority)
     date_match = re.search(r"(\d{1,2})\s+([a-z]+)", raw)
     if date_match:
         day = int(date_match.group(1))
-        month_name = date_match.group(2)
-        month = MONTHS.get(month_name)
-
+        month = MONTHS.get(date_match.group(2))
         if month:
             try:
                 event_date = datetime(now.year, month, day).date()
             except:
                 pass
 
-    # -------------------------------
-    # 2. WEEKDAY ONLY IF NO DATE
-    # -------------------------------
+    # 2. weekday only if no date
     if event_date is None:
         for d, idx in WEEKDAYS.items():
             if d in raw:
@@ -119,9 +137,7 @@ def parse(text: str):
                 event_date = (now + timedelta(days=diff)).date()
                 break
 
-    # -------------------------------
-    # 3. DEFAULT TODAY
-    # -------------------------------
+    # 3. default today
     if event_date is None:
         event_date = now.date()
 
@@ -153,7 +169,7 @@ def get_events(chat_id):
     cursor.execute("SELECT * FROM events WHERE chat_id=? ORDER BY event_time", (chat_id,))
     return cursor.fetchall()
 
-# ================= FORMAT ================= #
+# ================= FORMATTER ================= #
 
 def format_view(title, events):
     grouped = {}
@@ -180,6 +196,10 @@ def format_view(title, events):
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+
+    # 🚨 ONLY EVENTS PASS
+    if not is_event(text):
+        return
 
     title, dt = parse(text)
 
@@ -218,7 +238,6 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if filtered else "No events"
     )
 
-# ➕ NEW: NEXT WEEK
 async def nextweek(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TZ)
     start = now.date() - timedelta(days=now.weekday()) + timedelta(days=7)
@@ -238,6 +257,7 @@ async def nextweek(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(TZ)
+
     events = get_events(update.effective_chat.id)
 
     filtered = [
@@ -287,6 +307,8 @@ def main():
     app.add_handler(CommandHandler("edit", edit))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+    print("Calendar bot v3 stable running")
 
     app.run_webhook(
         listen="0.0.0.0",
