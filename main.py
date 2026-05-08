@@ -13,9 +13,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 
 TOKEN = os.getenv("TOKEN")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
-
 PORT = int(os.environ.get("PORT", 10000))
-RENDER_URL = os.getenv("RENDER_URL")  # <- zet deze in Render ENV
+RENDER_URL = os.getenv("RENDER_URL")
 
 # ================= DATABASE ================= #
 
@@ -39,16 +38,25 @@ def parse(text: str):
     text = text.lower().strip()
     now = datetime.now(NL_TZ)
 
+    weekdays = {
+        "monday": 0, "tuesday": 1, "wednesday": 2,
+        "thursday": 3, "friday": 4, "saturday": 5,
+        "sunday": 6,
+        "maandag": 0, "dinsdag": 1, "woensdag": 2,
+        "donderdag": 3, "vrijdag": 4, "zaterdag": 5,
+        "zondag": 6,
+    }
+
+    # ---------------- TIME ---------------- #
+
     hour = None
     minute = 0
 
-    # 13:00
     match = re.search(r"(\d{1,2}):(\d{2})", text)
     if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
 
-    # 13 → 13:00
     if hour is None:
         match = re.search(r"\b(\d{1,2})\b", text)
         if match:
@@ -58,16 +66,26 @@ def parse(text: str):
     if hour is None:
         return None, None
 
-    # DATE
-    event_date = now.date()
+    # ---------------- DATE ---------------- #
 
-    if "morgen" in text or "tomorrow" in text:
-        event_date = (now + timedelta(days=1)).date()
+    event_date = None
 
-    elif "overmorgen" in text:
-        event_date = (now + timedelta(days=2)).date()
+    for day, idx in weekdays.items():
+        if day in text:
+            days_ahead = idx - now.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+            event_date = (now + timedelta(days=days_ahead)).date()
+            break
 
-    # DATETIME
+    if event_date is None:
+        if "tomorrow" in text or "morgen" in text:
+            event_date = (now + timedelta(days=1)).date()
+        elif "overmorgen" in text:
+            event_date = (now + timedelta(days=2)).date()
+        else:
+            event_date = now.date()
+
     dt = datetime(
         year=event_date.year,
         month=event_date.month,
@@ -77,12 +95,17 @@ def parse(text: str):
         tzinfo=NL_TZ
     )
 
-    # TITLE CLEANUP
+    # ---------------- TITLE CLEANUP ---------------- #
+
     title = text
+
+    for day in weekdays.keys():
+        title = title.replace(day, "")
+
     title = re.sub(r"\d{1,2}:\d{2}", "", title)
     title = re.sub(r"\b\d{1,2}\b", "", title)
 
-    for w in ["morgen", "tomorrow", "overmorgen"]:
+    for w in ["tomorrow", "morgen", "overmorgen"]:
         title = title.replace(w, "")
 
     title = title.strip()
@@ -111,7 +134,7 @@ def get_events(chat_id):
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Agenda bot actief")
+    await update.message.reply_text("📅 Calendar bot is active")
 
 async def day(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -122,12 +145,12 @@ async def day(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if datetime.fromisoformat(e[3]).date() == now.date()
     ]
 
-    msg = "📅 Vandaag:\n\n"
+    msg = "📅 Today:\n\n"
     for e in events:
         dt = datetime.fromisoformat(e[3])
         msg += f"📌 {e[2]} → {dt.strftime('%H:%M')}\n"
 
-    await update.message.reply_text(msg if events else "Geen events vandaag")
+    await update.message.reply_text(msg if events else "No events today")
 
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -138,12 +161,12 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
     ]
 
-    msg = "📆 Deze week:\n\n"
+    msg = "📆 This week:\n\n"
     for e in events:
         dt = datetime.fromisoformat(e[3])
         msg += f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
 
-    await update.message.reply_text(msg if events else "Geen events deze week")
+    await update.message.reply_text(msg if events else "No events this week")
 
 async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -154,12 +177,12 @@ async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if datetime.fromisoformat(e[3]).month == now.month
     ]
 
-    msg = "🗓 Deze maand:\n\n"
+    msg = "🗓 This month:\n\n"
     for e in events:
         dt = datetime.fromisoformat(e[3])
         msg += f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
 
-    await update.message.reply_text(msg if events else "Geen events deze maand")
+    await update.message.reply_text(msg if events else "No events this month")
 
 # ================= MESSAGE HANDLER ================= #
 
@@ -169,13 +192,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title, dt = parse(text)
 
     if not dt:
-        await update.message.reply_text("❌ Gebruik: tomorrow 13 meeting of 13:00 tandarts")
+        await update.message.reply_text("❌ Could not understand. Example: Sunday 19:30 dinner")
         return
 
     add_event(update.effective_chat.id, title, dt)
 
     await update.message.reply_text(
-        f"✅ Toegevoegd:\n📌 {title}\n🕒 {dt.strftime('%d-%m %H:%M')}"
+        f"✅ Event added\n"
+        f"📌 {title}\n"
+        f"🕒 {dt.strftime('%A %d %B %H:%M')}"
     )
 
 # ================= REMINDERS ================= #
@@ -211,12 +236,11 @@ def reminder_loop(app):
 
         time.sleep(30)
 
-# ================= MAIN (CLEAN WEBHOOK) ================= #
+# ================= MAIN ================= #
 
 def main():
     app = Application.builder().token(TOKEN).build()
 
-    # BELANGRIJK: voorkomt oude updates / conflicts
     app.bot.delete_webhook(drop_pending_updates=True)
 
     app.add_handler(CommandHandler("start", start))
@@ -228,7 +252,7 @@ def main():
 
     threading.Thread(target=reminder_loop, args=(app,), daemon=True).start()
 
-    print("Bot running (WEBHOOK MODE - CLEAN)")
+    print("Bot running (FINAL VERSION)")
 
     app.run_webhook(
         listen="0.0.0.0",
