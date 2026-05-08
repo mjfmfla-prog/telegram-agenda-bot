@@ -1,8 +1,6 @@
 import os
 import re
 import sqlite3
-import threading
-import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,8 +17,9 @@ from telegram.ext import (
 # ================= CONFIG ================= #
 
 TOKEN = os.getenv("TOKEN")
-RENDER_URL = os.getenv("RENDER_URL")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
+
+# Render provides PORT but we DON'T need webhook anymore in this stable version
 PORT = int(os.environ.get("PORT", 10000))
 
 # ================= DB ================= #
@@ -57,7 +56,6 @@ def parse(text: str):
     hour = None
     minute = 0
 
-    # time parsing
     match = re.search(r"(\d{1,2}):(\d{2})", text)
     if match:
         hour = int(match.group(1))
@@ -71,11 +69,10 @@ def parse(text: str):
     if hour is None:
         return None, None
 
-    # date parsing
     event_date = None
 
-    for day, idx in weekdays.items():
-        if day in text:
+    for d, idx in weekdays.items():
+        if d in text:
             diff = idx - now.weekday()
             if diff <= 0:
                 diff += 7
@@ -90,24 +87,14 @@ def parse(text: str):
         else:
             event_date = now.date()
 
-    dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=NL_TZ)
-
-    title = text
-    for d in weekdays.keys():
-        title = title.replace(d, "")
-
-    title = re.sub(r"\d{1,2}:\d{2}", "", title)
-    title = re.sub(r"\b\d{1,2}\b", "", title)
-
-    for w in ["tomorrow", "morgen", "overmorgen"]:
-        title = title.replace(w, "")
-
-    title = title.strip()
-
-    if title == "":
-        title = "event"
-
-    return title, dt
+    return text, datetime(
+        event_date.year,
+        event_date.month,
+        event_date.day,
+        hour,
+        minute,
+        tzinfo=NL_TZ
+    )
 
 # ================= DB ================= #
 
@@ -138,27 +125,25 @@ def agenda_menu():
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Calendar bot is active")
+    await update.message.reply_text("📅 Calendar bot is running")
 
 async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Choose view:", reply_markup=agenda_menu())
 
-# ================= CALLBACKS ================= #
+# ================= CALLBACKS (FIXED CORE) ================= #
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    chat_id = query.message.chat.id
+    chat_id = q.message.chat.id
     now = datetime.now(NL_TZ)
 
-    data = query.data
+    data = q.data
 
-    # DELETE EVENT
     if data.startswith("del_"):
-        event_id = int(data.split("_")[1])
-        delete_event(event_id)
-        await query.message.reply_text("🗑 Event deleted")
+        delete_event(int(data.split("_")[1]))
+        await q.message.reply_text("🗑 Deleted")
         return
 
     events = get_events(chat_id)
@@ -176,18 +161,17 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = "🗓 This month"
 
     if not filtered:
-        await query.message.reply_text(title + "\n\nNo events")
+        await q.message.reply_text(title + "\n\nNo events")
         return
 
     msg = title + "\n\n"
 
     for e in filtered:
         dt = datetime.fromisoformat(e[3])
-
         msg += "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
         msg += "🆔 /delete " + str(e[0]) + "\n\n"
 
-    await query.message.reply_text(msg)
+    await q.message.reply_text(msg)
 
 # ================= MESSAGE ================= #
 
@@ -206,78 +190,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Added\n📌 " + title + "\n🕒 " + dt.strftime("%A %d %B %H:%M")
     )
 
-# ================= REMINDERS ================= #
+# ================= SCHEDULER (NO THREADS) ================= #
 
-def reminder_loop(app):
-    while True:
-        now = datetime.now(NL_TZ)
+async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now(NL_TZ)
 
-        cursor.execute("SELECT * FROM events")
-        events = cursor.fetchall()
+    cursor.execute("SELECT * FROM events")
+    events = cursor.fetchall()
 
-        for e in events:
-            if e[4]:
-                continue
+    for e in events:
+        if e[4]:
+            continue
 
-            dt = datetime.fromisoformat(e[3])
+        dt = datetime.fromisoformat(e[3])
 
-            if now >= dt - timedelta(minutes=15):
-                try:
-                    app.bot.send_message(
-                        chat_id=e[1],
-                        text="🔔 Reminder\n📌 " + e[2] + "\n🕒 " + dt.strftime("%H:%M")
-                    )
+        if now >= dt - timedelta(minutes=15):
+            try:
+                await context.bot.send_message(
+                    chat_id=e[1],
+                    text="🔔 Reminder\n📌 " + e[2] + "\n🕒 " + dt.strftime("%H:%M")
+                )
 
-                    cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
-                    conn.commit()
-
-                except:
-                    pass
-
-        time.sleep(30)
-
-# ================= MORNING SUMMARY ================= #
-
-def morning_loop(app):
-    sent = set()
-
-    while True:
-        now = datetime.now(NL_TZ)
-
-        if now.hour == 8 and now.date() not in sent:
-            cursor.execute("SELECT DISTINCT chat_id FROM events")
-            chats = cursor.fetchall()
-
-            for c in chats:
-                events = get_events(c[0])
-
-                today = [
-                    e for e in events
-                    if datetime.fromisoformat(e[3]).date() == now.date()
-                ]
-
-                if today:
-                    msg = "🌅 Today:\n\n"
-
-                    for e in today:
-                        dt = datetime.fromisoformat(e[3])
-                        msg += "📌 " + e[2] + " → " + dt.strftime("%H:%M") + "\n"
-
-                    try:
-                        app.bot.send_message(chat_id=c[0], text=msg)
-                    except:
-                        pass
-
-            sent.add(now.date())
-
-        time.sleep(60)
+                cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
+                conn.commit()
+            except:
+                pass
 
 # ================= MAIN ================= #
 
 def main():
     app = Application.builder().token(TOKEN).build()
-
-    app.bot.delete_webhook(drop_pending_updates=True)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("agenda", agenda))
@@ -285,17 +227,12 @@ def main():
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    threading.Thread(target=reminder_loop, args=(app,), daemon=True).start()
-    threading.Thread(target=morning_loop, args=(app,), daemon=True).start()
+    # stable job queue instead of threads
+    app.job_queue.run_repeating(reminder_job, interval=30, first=10)
 
-    print("Bot running CLEAN V4")
+    print("Bot running V5 stable")
 
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=RENDER_URL + "/" + TOKEN
-    )
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
