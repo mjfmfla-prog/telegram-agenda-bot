@@ -1,15 +1,33 @@
 import os
 import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update
-from telegram.ext import Application, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, ContextTypes, filters
 
 # ---------------- CONFIG ---------------- #
 
 TOKEN = os.getenv("TOKEN")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
+
+# ---------------- KEEP ALIVE SERVER (RENDER FIX) ---------------- #
+
+PORT = int(os.environ.get("PORT", 10000))
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+def run_server():
+    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    server.serve_forever()
+
+threading.Thread(target=run_server, daemon=True).start()
 
 # ---------------- DATABASE ---------------- #
 
@@ -27,7 +45,6 @@ CREATE TABLE IF NOT EXISTS events (
 """)
 conn.commit()
 
-
 # ---------------- PARSER ---------------- #
 
 def parse_natural(text: str):
@@ -36,10 +53,8 @@ def parse_natural(text: str):
 
     date = None
     time = None
-
     words = text.split()
 
-    # time (HH:MM)
     for w in words:
         if ":" in w:
             try:
@@ -47,32 +62,22 @@ def parse_natural(text: str):
             except:
                 pass
 
-    # date keywords
     if "tomorrow" in text:
         date = now + timedelta(days=1)
     elif "today" in text:
         date = now
-    else:
-        for w in words:
-            if "-" in w and len(w) == 5:
-                try:
-                    date = datetime.strptime(w + f"-{now.year}", "%d-%m-%Y")
-                except:
-                    pass
 
     if not date or not time:
         return None, None
 
     dt = datetime.combine(date.date(), time).replace(tzinfo=NL_TZ)
 
-    # clean title
     title = text
     for w in words:
-        if w in ["tomorrow", "today"] or ":" in w or "-" in w:
+        if w in ["tomorrow", "today"] or ":" in w:
             title = title.replace(w, "")
 
     return title.strip(), dt
-
 
 # ---------------- DB ---------------- #
 
@@ -83,16 +88,7 @@ def add_event(chat_id, title, dt):
     )
     conn.commit()
 
-
-def get_events(chat_id):
-    cursor.execute(
-        "SELECT title, event_time FROM events WHERE chat_id=? ORDER BY event_time",
-        (chat_id,),
-    )
-    return cursor.fetchall()
-
-
-# ---------------- HANDLERS ---------------- #
+# ---------------- HANDLER ---------------- #
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -101,9 +97,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title, dt = parse_natural(text)
 
     if not dt:
-        await update.message.reply_text(
-            "❌ Niet begrepen.\nVoorbeeld: dentist tomorrow 14:00"
-        )
+        await update.message.reply_text("❌ Gebruik: dentist tomorrow 14:00")
         return
 
     add_event(chat_id, title, dt)
@@ -112,23 +106,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ Toegevoegd:\n{title}\n🕒 {dt.strftime('%d-%m %H:%M')}"
     )
 
-
-async def show_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    events = get_events(chat_id)
-
-    if not events:
-        await update.message.reply_text("Geen afspraken gevonden.")
-        return
-
-    msg = "📅 Agenda:\n\n"
-    for title, event_time in events:
-        msg += f"- {title} → {event_time}\n"
-
-    await update.message.reply_text(msg)
-
-
-# ---------------- MAIN (STABLE) ---------------- #
+# ---------------- MAIN ---------------- #
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -137,15 +115,9 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    app.add_handler(
-        MessageHandler(filters.Regex("^/agenda$"), show_agenda)
-    )
+    print("Bot running on Render...")
 
-    print("Bot is running...")
-
-    # IMPORTANT: no asyncio, no loops, no post_init
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
