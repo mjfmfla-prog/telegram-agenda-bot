@@ -5,12 +5,11 @@ import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -18,7 +17,7 @@ from telegram.ext import (
 # ================= CONFIG ================= #
 
 TOKEN = os.getenv("TOKEN")
-RENDER_URL = os.getenv("RENDER_URL")  # https://your-app.onrender.com
+RENDER_URL = os.getenv("RENDER_URL")
 PORT = int(os.environ.get("PORT", 10000))
 NL_TZ = ZoneInfo("Europe/Amsterdam")
 
@@ -33,46 +32,43 @@ CREATE TABLE IF NOT EXISTS events (
     chat_id INTEGER,
     title TEXT,
     event_time TEXT,
-    reminded INTEGER DEFAULT 0
+    reminded INTEGER DEFAULT 0,
+    morning_sent INTEGER DEFAULT 0
 )
 """)
 conn.commit()
 
 # ================= PARSER ================= #
 
+WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2,
+    "thursday": 3, "friday": 4, "saturday": 5,
+    "sunday": 6,
+    "maandag": 0, "dinsdag": 1, "woensdag": 2,
+    "donderdag": 3, "vrijdag": 4, "zaterdag": 5,
+    "zondag": 6,
+}
+
 def parse(text: str):
-    text = text.lower().strip()
+    raw = text.lower().strip()
     now = datetime.now(NL_TZ)
 
-    weekdays = {
-        "monday": 0, "tuesday": 1, "wednesday": 2,
-        "thursday": 3, "friday": 4, "saturday": 5,
-        "sunday": 6,
-        "maandag": 0, "dinsdag": 1, "woensdag": 2,
-        "donderdag": 3, "vrijdag": 4, "zaterdag": 5,
-        "zondag": 6,
-    }
-
-    hour = None
-    minute = 0
-
-    match = re.search(r"(\d{1,2}):(\d{2})", text)
+    match = re.search(r"(\d{1,2}):(\d{2})", raw)
     if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
     else:
-        match = re.search(r"\b(\d{1,2})\b", text)
+        match = re.search(r"\b(\d{1,2})\b", raw)
         if match:
             hour = int(match.group(1))
             minute = 0
-
-    if hour is None:
-        return None, None
+        else:
+            return None, None
 
     event_date = None
 
-    for d, idx in weekdays.items():
-        if d in text:
+    for d, idx in WEEKDAYS.items():
+        if d in raw:
             diff = idx - now.weekday()
             if diff <= 0:
                 diff += 7
@@ -80,14 +76,14 @@ def parse(text: str):
             break
 
     if event_date is None:
-        if "tomorrow" in text or "morgen" in text:
+        if "tomorrow" in raw or "morgen" in raw:
             event_date = (now + timedelta(days=1)).date()
-        elif "overmorgen" in text:
+        elif "overmorgen" in raw:
             event_date = (now + timedelta(days=2)).date()
         else:
             event_date = now.date()
 
-    return text, datetime(
+    dt = datetime(
         event_date.year,
         event_date.month,
         event_date.day,
@@ -95,6 +91,21 @@ def parse(text: str):
         minute,
         tzinfo=NL_TZ
     )
+
+    # CLEAN TITLE
+    title = raw
+
+    for d in WEEKDAYS.keys():
+        title = title.replace(d, "")
+
+    title = re.sub(r"\d{1,2}:\d{2}", "", title)
+    title = re.sub(r"\b\d{1,2}\b", "", title)
+    title = re.sub(r"\s+", " ", title).strip()
+
+    if title == "":
+        title = "event"
+
+    return title, dt
 
 # ================= DB ================= #
 
@@ -109,74 +120,14 @@ def get_events(chat_id):
     cursor.execute("SELECT * FROM events WHERE chat_id=? ORDER BY event_time", (chat_id,))
     return cursor.fetchall()
 
-def delete_event(event_id):
-    cursor.execute("DELETE FROM events WHERE id=?", (event_id,))
-    conn.commit()
-
-# ================= UI ================= #
-
-def agenda_menu():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Day", callback_data="day")],
-        [InlineKeyboardButton("📆 Week", callback_data="week")],
-        [InlineKeyboardButton("🗓 Month", callback_data="month")],
-    ])
+def get_all_chats():
+    cursor.execute("SELECT DISTINCT chat_id FROM events")
+    return cursor.fetchall()
 
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Bot running (WEBHOOK MODE)")
-
-async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Choose view:", reply_markup=agenda_menu())
-
-# ================= CALLBACKS ================= #
-
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    chat_id = q.message.chat.id
-    now = datetime.now(NL_TZ)
-
-    data = q.data
-
-    if data.startswith("del_"):
-        delete_event(int(data.split("_")[1]))
-        await q.message.reply_text("🗑 Deleted")
-        return
-
-    events = get_events(chat_id)
-
-    if data == "day":
-        filtered = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
-        title = "📅 Today"
-
-    elif data == "week":
-        filtered = [
-            e for e in events
-            if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
-        ]
-        title = "📆 This week"
-
-    else:
-        filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
-        title = "🗓 This month"
-
-    if not filtered:
-        await q.message.reply_text(title + "\n\nNo events")
-        return
-
-    msg = title + "\n\n"
-
-    for e in filtered:
-        dt = datetime.fromisoformat(e[3])
-        msg += "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
-        msg += "🆔 /delete " + str(e[0]) + "\n\n"
-
-    await q.message.reply_text(msg)
-
-# ================= MESSAGE ================= #
+    await update.message.reply_text("📅 Calendar bot running")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -190,53 +141,106 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_event(update.effective_chat.id, title, dt)
 
     await update.message.reply_text(
-        "✅ Added\n📌 " + title + "\n🕒 " + dt.strftime("%A %d %B %H:%M")
+        "✅ Added\n📌 " + title +
+        "\n🕒 " + dt.strftime("%A %d %B %H:%M")
     )
 
-# ================= BACKGROUND LOOP ================= #
+# ================= VIEWS ================= #
 
-async def reminder_loop(app: Application):
+async def day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show(update, "day")
+
+async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show(update, "week")
+
+async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show(update, "month")
+
+async def show(update, mode):
+    chat_id = update.effective_chat.id
+    now = datetime.now(NL_TZ)
+
+    events = get_events(chat_id)
+
+    if mode == "day":
+        filtered = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
+        title = "📅 Today"
+
+    elif mode == "week":
+        filtered = [
+            e for e in events
+            if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
+        ]
+        title = "📆 This week"
+
+    else:
+        filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
+        title = "🗓 This month"
+
+    if not filtered:
+        await update.message.reply_text(title + "\n\nNo events")
+        return
+
+    msg = title + "\n\n"
+
+    for e in filtered:
+        dt = datetime.fromisoformat(e[3])
+        msg += "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
+
+    await update.message.reply_text(msg)
+
+# ================= MORNING SUMMARY ================= #
+
+async def morning_summary(app):
     while True:
         now = datetime.now(NL_TZ)
 
-        cursor.execute("SELECT * FROM events")
-        events = cursor.fetchall()
+        if now.hour == 8 and now.minute == 0:
+            chats = get_all_chats()
 
-        for e in events:
-            if e[4]:
-                continue
+            for c in chats:
+                chat_id = c[0]
 
-            dt = datetime.fromisoformat(e[3])
+                cursor.execute(
+                    "SELECT * FROM events WHERE chat_id=?",
+                    (chat_id,)
+                )
+                events = cursor.fetchall()
 
-            if now >= dt - timedelta(minutes=15):
-                try:
-                    await app.bot.send_message(
-                        chat_id=e[1],
-                        text="🔔 Reminder\n📌 " + e[2] + "\n🕒 " + dt.strftime("%H:%M")
-                    )
+                today = [
+                    e for e in events
+                    if datetime.fromisoformat(e[3]).date() == now.date()
+                ]
 
-                    cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
-                    conn.commit()
+                if today:
+                    msg = "🌅 Today’s schedule:\n\n"
 
-                except:
-                    pass
+                    for e in today:
+                        dt = datetime.fromisoformat(e[3])
+                        msg += "📌 " + e[2] + " → " + dt.strftime("%H:%M") + "\n"
 
-        await asyncio.sleep(30)
+                    try:
+                        await app.bot.send_message(chat_id=chat_id, text=msg)
+                    except:
+                        pass
 
-# ================= MAIN (FIXED WEBHOOK LIFECYCLE) ================= #
+        await asyncio.sleep(60)
+
+# ================= MAIN ================= #
 
 def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("agenda", agenda))
-    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(CommandHandler("day", day))
+    app.add_handler(CommandHandler("week", week))
+    app.add_handler(CommandHandler("month", month))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # safe background task (NO job_queue, NO threads)
-    asyncio.get_event_loop().create_task(reminder_loop(app))
+    # background task (NO job_queue, NO threads)
+    asyncio.get_event_loop().create_task(morning_summary(app))
 
-    print("Bot running CLEAN WEBHOOK FIXED")
+    print("Bot running with MORNING SUMMARY")
 
     app.run_webhook(
         listen="0.0.0.0",
