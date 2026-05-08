@@ -57,12 +57,12 @@ def parse(text: str):
     hour = None
     minute = 0
 
+    # time parsing
     match = re.search(r"(\d{1,2}):(\d{2})", text)
     if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
-
-    if hour is None:
+    else:
         match = re.search(r"\b(\d{1,2})\b", text)
         if match:
             hour = int(match.group(1))
@@ -71,10 +71,11 @@ def parse(text: str):
     if hour is None:
         return None, None
 
+    # date parsing
     event_date = None
 
-    for d, idx in weekdays.items():
-        if d in text:
+    for day, idx in weekdays.items():
+        if day in text:
             diff = idx - now.weekday()
             if diff <= 0:
                 diff += 7
@@ -92,7 +93,6 @@ def parse(text: str):
     dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=NL_TZ)
 
     title = text
-
     for d in weekdays.keys():
         title = title.replace(d, "")
 
@@ -184,10 +184,8 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for e in filtered:
         dt = datetime.fromisoformat(e[3])
 
-        line = "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
-        line += "🆔 /delete " + str(e[0]) + "\n\n"
-
-        msg += line
+        msg += "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
+        msg += "🆔 /delete " + str(e[0]) + "\n\n"
 
     await query.message.reply_text(msg)
 
@@ -204,13 +202,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     add_event(update.effective_chat.id, title, dt)
 
-    msg = (
-        "✅ Added\n"
-        "📌 " + title + "\n"
-        "🕒 " + dt.strftime("%A %d %B %H:%M")
+    await update.message.reply_text(
+        "✅ Added\n📌 " + title + "\n🕒 " + dt.strftime("%A %d %B %H:%M")
     )
-
-    await update.message.reply_text(msg)
 
 # ================= REMINDERS ================= #
 
@@ -242,7 +236,7 @@ def reminder_loop(app):
 
         time.sleep(30)
 
-# ================= MORNING ================= #
+# ================= MORNING SUMMARY ================= #
 
 def morning_loop(app):
     sent = set()
@@ -250,4 +244,58 @@ def morning_loop(app):
     while True:
         now = datetime.now(NL_TZ)
 
-        if now.hour == 8 and now
+        if now.hour == 8 and now.date() not in sent:
+            cursor.execute("SELECT DISTINCT chat_id FROM events")
+            chats = cursor.fetchall()
+
+            for c in chats:
+                events = get_events(c[0])
+
+                today = [
+                    e for e in events
+                    if datetime.fromisoformat(e[3]).date() == now.date()
+                ]
+
+                if today:
+                    msg = "🌅 Today:\n\n"
+
+                    for e in today:
+                        dt = datetime.fromisoformat(e[3])
+                        msg += "📌 " + e[2] + " → " + dt.strftime("%H:%M") + "\n"
+
+                    try:
+                        app.bot.send_message(chat_id=c[0], text=msg)
+                    except:
+                        pass
+
+            sent.add(now.date())
+
+        time.sleep(60)
+
+# ================= MAIN ================= #
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+
+    app.bot.delete_webhook(drop_pending_updates=True)
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("agenda", agenda))
+
+    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    threading.Thread(target=reminder_loop, args=(app,), daemon=True).start()
+    threading.Thread(target=morning_loop, args=(app,), daemon=True).start()
+
+    print("Bot running CLEAN V4")
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=RENDER_URL + "/" + TOKEN
+    )
+
+if __name__ == "__main__":
+    main()
