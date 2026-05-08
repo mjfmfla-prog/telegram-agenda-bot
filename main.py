@@ -6,15 +6,15 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # ================= CONFIG ================= #
 
 TOKEN = os.getenv("TOKEN")
+RENDER_URL = os.getenv("RENDER_URL")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
 PORT = int(os.environ.get("PORT", 10000))
-RENDER_URL = os.getenv("RENDER_URL")
 
 # ================= DATABASE ================= #
 
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS events (
 """)
 conn.commit()
 
-# ================= SMART PARSER ================= #
+# ================= PARSER ================= #
 
 def parse(text: str):
     text = text.lower().strip()
@@ -46,8 +46,6 @@ def parse(text: str):
         "donderdag": 3, "vrijdag": 4, "zaterdag": 5,
         "zondag": 6,
     }
-
-    # ---------------- TIME ---------------- #
 
     hour = None
     minute = 0
@@ -66,12 +64,10 @@ def parse(text: str):
     if hour is None:
         return None, None
 
-    # ---------------- DATE ---------------- #
-
     event_date = None
 
-    for day, idx in weekdays.items():
-        if day in text:
+    for d, idx in weekdays.items():
+        if d in text:
             days_ahead = idx - now.weekday()
             if days_ahead <= 0:
                 days_ahead += 7
@@ -86,36 +82,25 @@ def parse(text: str):
         else:
             event_date = now.date()
 
-    dt = datetime(
-        year=event_date.year,
-        month=event_date.month,
-        day=event_date.day,
-        hour=hour,
-        minute=minute,
-        tzinfo=NL_TZ
-    )
-
-    # ---------------- TITLE CLEANUP ---------------- #
+    dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=NL_TZ)
 
     title = text
-
-    for day in weekdays.keys():
-        title = title.replace(day, "")
-
     title = re.sub(r"\d{1,2}:\d{2}", "", title)
     title = re.sub(r"\b\d{1,2}\b", "", title)
+
+    for w in weekdays.keys():
+        title = title.replace(w, "")
 
     for w in ["tomorrow", "morgen", "overmorgen"]:
         title = title.replace(w, "")
 
     title = title.strip()
-
     if title == "":
         title = "event"
 
     return title, dt
 
-# ================= DB HELPERS ================= #
+# ================= DB ================= #
 
 def add_event(chat_id, title, dt):
     cursor.execute(
@@ -125,83 +110,100 @@ def add_event(chat_id, title, dt):
     conn.commit()
 
 def get_events(chat_id):
-    cursor.execute(
-        "SELECT * FROM events WHERE chat_id=? ORDER BY event_time",
-        (chat_id,),
-    )
+    cursor.execute("SELECT * FROM events WHERE chat_id=? ORDER BY event_time", (chat_id,))
     return cursor.fetchall()
+
+def delete_event(event_id):
+    cursor.execute("DELETE FROM events WHERE id=?", (event_id,))
+    conn.commit()
+
+def edit_event(event_id, new_title, new_dt):
+    cursor.execute(
+        "UPDATE events SET title=?, event_time=?, reminded=0 WHERE id=?",
+        (new_title, new_dt.isoformat(), event_id),
+    )
+    conn.commit()
+
+# ================= MENU ================= #
+
+def agenda_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Day", callback_data="day")],
+        [InlineKeyboardButton("📆 Week", callback_data="week")],
+        [InlineKeyboardButton("🗓 Month", callback_data="month")],
+    ])
 
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Calendar bot is active")
+    await update.message.reply_text("📅 Calendar bot active")
 
-async def day(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📂 Choose view:", reply_markup=agenda_menu())
+
+async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    chat_id = q.message.chat.id
     now = datetime.now(NL_TZ)
+    events = get_events(chat_id)
 
-    events = [
-        e for e in get_events(chat_id)
-        if datetime.fromisoformat(e[3]).date() == now.date()
-    ]
+    if q.data == "day":
+        filtered = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
+        title = "📅 Today"
 
-    msg = "📅 Today:\n\n"
-    for e in events:
-        dt = datetime.fromisoformat(e[3])
-        msg += f"📌 {e[2]} → {dt.strftime('%H:%M')}\n"
+    elif q.data == "week":
+        filtered = [e for e in events if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)]
+        title = "📆 This week"
 
-    await update.message.reply_text(msg if events else "No events today")
+    else:
+        filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
+        title = "🗓 This month"
 
-async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    now = datetime.now(NL_TZ)
-
-    events = [
-        e for e in get_events(chat_id)
-        if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
-    ]
-
-    msg = "📆 This week:\n\n"
-    for e in events:
+    msg = f"{title}\n\n"
+    for e in filtered:
         dt = datetime.fromisoformat(e[3])
         msg += f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
 
-    await update.message.reply_text(msg if events else "No events this week")
-
-async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    now = datetime.now(NL_TZ)
-
-    events = [
-        e for e in get_events(chat_id)
-        if datetime.fromisoformat(e[3]).month == now.month
-    ]
-
-    msg = "🗓 This month:\n\n"
-    for e in events:
-        dt = datetime.fromisoformat(e[3])
-        msg += f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
-
-    await update.message.reply_text(msg if events else "No events this month")
-
-# ================= MESSAGE HANDLER ================= #
+    await q.message.reply_text(msg if filtered else "No events")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-
     title, dt = parse(text)
 
     if not dt:
-        await update.message.reply_text("❌ Could not understand. Example: Sunday 19:30 dinner")
+        await update.message.reply_text("❌ Example: Sunday 19:30 dinner")
         return
 
     add_event(update.effective_chat.id, title, dt)
 
     await update.message.reply_text(
-        f"✅ Event added\n"
-        f"📌 {title}\n"
-        f"🕒 {dt.strftime('%A %d %B %H:%M')}"
+        f"✅ Added\n📌 {title}\n🕒 {dt.strftime('%A %d %B %H:%M')}"
     )
+
+async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        delete_event(int(context.args[0]))
+        await update.message.reply_text("🗑 Deleted")
+    except:
+        await update.message.reply_text("Usage: /delete ID")
+
+async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        event_id = int(context.args[0])
+        text = " ".join(context.args[1:])
+        title, dt = parse(text)
+
+        if not dt:
+            await update.message.reply_text("Invalid format")
+            return
+
+        edit_event(event_id, title, dt)
+        await update.message.reply_text("✏️ Updated")
+
+    except:
+        await update.message.reply_text("Usage: /edit ID new text")
 
 # ================= REMINDERS ================= #
 
@@ -225,16 +227,46 @@ def reminder_loop(app):
                         text=f"🔔 Reminder\n📌 {e[2]}\n🕒 {dt.strftime('%H:%M')}"
                     )
 
-                    cursor.execute(
-                        "UPDATE events SET reminded=1 WHERE id=?",
-                        (e[0],),
-                    )
+                    cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
                     conn.commit()
 
                 except:
                     pass
 
         time.sleep(30)
+
+# ================= MORNING SUMMARY ================= #
+
+def morning_loop(app):
+    sent = set()
+
+    while True:
+        now = datetime.now(NL_TZ)
+
+        if now.hour == 8 and now.date() not in sent:
+            cursor.execute("SELECT DISTINCT chat_id FROM events")
+            chats = cursor.fetchall()
+
+            for c in chats:
+                chat_id = c[0]
+                events = get_events(chat_id)
+
+                today = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
+
+                if today:
+                    msg = "🌅 Today:\n\n"
+                    for e in today:
+                        dt = datetime.fromisoformat(e[3])
+                        msg += f"📌 {e[2]} → {dt.strftime('%H:%M')}\n"
+
+                    try:
+                        app.bot.send_message(chat_id=chat_id, text=msg)
+                    except:
+                        pass
+
+            sent.add(now.date())
+
+        time.sleep(60)
 
 # ================= MAIN ================= #
 
@@ -244,15 +276,17 @@ def main():
     app.bot.delete_webhook(drop_pending_updates=True)
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("day", day))
-    app.add_handler(CommandHandler("week", week))
-    app.add_handler(CommandHandler("month", month))
+    app.add_handler(CommandHandler("agenda", agenda))
+    app.add_handler(CommandHandler("delete", delete_cmd))
+    app.add_handler(CommandHandler("edit", edit_cmd))
 
+    app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     threading.Thread(target=reminder_loop, args=(app,), daemon=True).start()
+    threading.Thread(target=morning_loop, args=(app,), daemon=True).start()
 
-    print("Bot running (FINAL VERSION)")
+    print("Bot running (V2 FULL)")
 
     app.run_webhook(
         listen="0.0.0.0",
