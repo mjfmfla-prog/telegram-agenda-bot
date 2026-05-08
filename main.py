@@ -125,7 +125,7 @@ def agenda_menu():
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Bot running (webhook mode)")
+    await update.message.reply_text("📅 Bot running (WEBHOOK MODE)")
 
 async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Choose view:", reply_markup=agenda_menu())
@@ -153,12 +153,19 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title = "📅 Today"
 
     elif data == "week":
-        filtered = [e for e in events if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)]
+        filtered = [
+            e for e in events
+            if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
+        ]
         title = "📆 This week"
 
     else:
         filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
         title = "🗓 This month"
+
+    if not filtered:
+        await q.message.reply_text(title + "\n\nNo events")
+        return
 
     msg = title + "\n\n"
 
@@ -186,9 +193,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Added\n📌 " + title + "\n🕒 " + dt.strftime("%A %d %B %H:%M")
     )
 
-# ================= CUSTOM SCHEDULER (NO JOBQUEUE) ================= #
+# ================= BACKGROUND LOOP ================= #
 
-async def reminder_loop(app):
+async def reminder_loop(app: Application):
     while True:
         now = datetime.now(NL_TZ)
 
@@ -216,9 +223,9 @@ async def reminder_loop(app):
 
         await asyncio.sleep(30)
 
-# ================= MAIN (WEBHOOK FIXED) ================= #
+# ================= MAIN (FIXED WEBHOOK LIFECYCLE) ================= #
 
-async def main():
+def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -226,10 +233,10 @@ async def main():
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # start background task safely (NO job_queue)
-    asyncio.create_task(reminder_loop(app))
+    # safe background task (NO job_queue, NO threads)
+    asyncio.get_event_loop().create_task(reminder_loop(app))
 
-    print("Bot running WEBHOOK SAFE MODE")
+    print("Bot running CLEAN WEBHOOK FIXED")
 
     app.run_webhook(
         listen="0.0.0.0",
@@ -240,5 +247,4 @@ async def main():
     )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
