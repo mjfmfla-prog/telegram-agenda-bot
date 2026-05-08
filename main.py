@@ -1,11 +1,12 @@
 import os
 import sqlite3
-import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
+
+# ---------------- CONFIG ---------------- #
 
 TOKEN = os.getenv("TOKEN")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
@@ -38,7 +39,7 @@ def parse_natural(text: str):
 
     words = text.split()
 
-    # time HH:MM
+    # time (HH:MM)
     for w in words:
         if ":" in w:
             try:
@@ -64,6 +65,7 @@ def parse_natural(text: str):
 
     dt = datetime.combine(date.date(), time).replace(tzinfo=NL_TZ)
 
+    # clean title
     title = text
     for w in words:
         if w in ["tomorrow", "today"] or ":" in w or "-" in w:
@@ -72,7 +74,7 @@ def parse_natural(text: str):
     return title.strip(), dt
 
 
-# ---------------- DATABASE FUNCTIONS ---------------- #
+# ---------------- DB ---------------- #
 
 def add_event(chat_id, title, dt):
     cursor.execute(
@@ -82,22 +84,15 @@ def add_event(chat_id, title, dt):
     conn.commit()
 
 
-def get_pending_events():
+def get_events(chat_id):
     cursor.execute(
-        "SELECT id, chat_id, title, event_time FROM events WHERE reminded = 0"
+        "SELECT title, event_time FROM events WHERE chat_id=? ORDER BY event_time",
+        (chat_id,),
     )
     return cursor.fetchall()
 
 
-def mark_reminded(event_id):
-    cursor.execute(
-        "UPDATE events SET reminded = 1 WHERE id = ?",
-        (event_id,),
-    )
-    conn.commit()
-
-
-# ---------------- MESSAGE HANDLER ---------------- #
+# ---------------- HANDLERS ---------------- #
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -106,43 +101,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title, dt = parse_natural(text)
 
     if not dt:
-        await update.message.reply_text("❌ Try: 'dentist tomorrow 14:00'")
+        await update.message.reply_text(
+            "❌ Niet begrepen.\nVoorbeeld: dentist tomorrow 14:00"
+        )
         return
 
     add_event(chat_id, title, dt)
 
     await update.message.reply_text(
-        f"✅ Added:\n{title}\n🕒 {dt.strftime('%d-%m %H:%M')}"
+        f"✅ Toegevoegd:\n{title}\n🕒 {dt.strftime('%d-%m %H:%M')}"
     )
 
 
-# ---------------- REMINDER LOOP ---------------- #
+async def show_agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    events = get_events(chat_id)
 
-async def reminder_loop(app):
-    while True:
-        now = datetime.now(NL_TZ)
-        events = get_pending_events()
+    if not events:
+        await update.message.reply_text("Geen afspraken gevonden.")
+        return
 
-        for event in events:
-            event_id, chat_id, title, event_time = event
-            event_dt = datetime.fromisoformat(event_time)
+    msg = "📅 Agenda:\n\n"
+    for title, event_time in events:
+        msg += f"- {title} → {event_time}\n"
 
-            reminder_time = event_dt - timedelta(minutes=15)
-
-            if now >= reminder_time:
-                try:
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🔔 Reminder: {title}\n🕒 {event_dt.strftime('%d-%m %H:%M')}"
-                    )
-                    mark_reminded(event_id)
-                except Exception as e:
-                    print("Error sending reminder:", e)
-
-        await asyncio.sleep(30)
+    await update.message.reply_text(msg)
 
 
-# ---------------- MAIN (FIXED FOR RENDER) ---------------- #
+# ---------------- MAIN (STABLE) ---------------- #
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -151,14 +137,13 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
+    app.add_handler(
+        MessageHandler(filters.Regex("^/agenda$"), show_agenda)
+    )
+
     print("Bot is running...")
 
-    # background task SAFE way (NO asyncio.run, NO loop errors)
-    async def start_tasks():
-        asyncio.create_task(reminder_loop(app))
-
-    app.post_init = start_tasks
-
+    # IMPORTANT: no asyncio, no loops, no post_init
     app.run_polling()
 
 
