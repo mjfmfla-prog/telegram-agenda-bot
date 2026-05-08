@@ -1,8 +1,8 @@
 import os
+import re
 import sqlite3
 import threading
 import time
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -24,7 +24,7 @@ NL_TZ = ZoneInfo("Europe/Amsterdam")
 
 PORT = int(os.environ.get("PORT", 10000))
 
-# ---------------- KEEP ALIVE ---------------- #
+# ---------------- KEEP ALIVE (RENDER FIX) ---------------- #
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -48,18 +48,18 @@ CREATE TABLE IF NOT EXISTS events (
     chat_id INTEGER,
     title TEXT,
     event_time TEXT,
-    recurring TEXT DEFAULT NULL,
     reminded INTEGER DEFAULT 0
 )
 """)
 conn.commit()
 
-# ---------------- PARSER ---------------- #
+# ---------------- FIXED PARSER ---------------- #
 
 def parse(text: str):
     text = text.lower()
     now = datetime.now(NL_TZ)
 
+    # TIME
     time_match = re.search(r"(\d{1,2}:\d{2})", text)
     if not time_match:
         return None, None
@@ -69,32 +69,40 @@ def parse(text: str):
     except:
         return None, None
 
+    # DATE
     date = now
 
     if "tomorrow" in text:
         date = now + timedelta(days=1)
-    elif "next week" in text:
-        date = now + timedelta(days=7)
+    elif "today" in text:
+        date = now
 
     dt = datetime.combine(date.date(), t).replace(tzinfo=NL_TZ)
 
+    # TITLE CLEANUP
     title = text
-    title = title.replace("tomorrow", "").replace("next week", "")
-    title = title.replace(time_match.group(1), "").strip()
+    title = title.replace("tomorrow", "").replace("today", "")
+    title = re.sub(r"\d{1,2}:\d{2}", "", title).strip()
+
+    if not title:
+        title = "event"
 
     return title, dt
 
 # ---------------- DB HELPERS ---------------- #
 
-def add_event(chat_id, title, dt, recurring=None):
-    cursor.execute("""
-        INSERT INTO events (chat_id, title, event_time, recurring)
-        VALUES (?, ?, ?, ?)
-    """, (chat_id, title, dt.isoformat(), recurring))
+def add_event(chat_id, title, dt):
+    cursor.execute(
+        "INSERT INTO events (chat_id, title, event_time) VALUES (?, ?, ?)",
+        (chat_id, title, dt.isoformat()),
+    )
     conn.commit()
 
 def get_events(chat_id):
-    cursor.execute("SELECT * FROM events WHERE chat_id=? ORDER BY event_time", (chat_id,))
+    cursor.execute(
+        "SELECT * FROM events WHERE chat_id=? ORDER BY event_time",
+        (chat_id,),
+    )
     return cursor.fetchall()
 
 def delete_event(event_id):
@@ -176,6 +184,7 @@ async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     msg = "📅 Vandaag:\n\n"
+
     for e in today:
         dt = datetime.fromisoformat(e[3])
         msg += f"{e[0]} - {e[2]} → {dt.strftime('%H:%M')}\n"
@@ -188,13 +197,14 @@ async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     events = get_events(chat_id)
 
-    week = [
+    week_events = [
         e for e in events
         if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
     ]
 
     msg = "📆 Week:\n\n"
-    for e in week:
+
+    for e in week_events:
         dt = datetime.fromisoformat(e[3])
         msg += f"{e[0]} - {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
 
@@ -205,7 +215,7 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         delete_event(int(context.args[0]))
         await update.message.reply_text("🗑 verwijderd")
     except:
-        await update.message.reply_text("Gebruik /delete ID")
+        await update.message.reply_text("Gebruik: /delete ID")
 
 # ---------------- REMINDERS ---------------- #
 
@@ -217,7 +227,7 @@ def reminder_loop(app):
         events = cursor.fetchall()
 
         for e in events:
-            if e[5]:  # reminded
+            if e[4]:  # reminded
                 continue
 
             dt = datetime.fromisoformat(e[3])
@@ -262,6 +272,7 @@ def morning_loop(app):
 
                 if today:
                     msg = "🌅 Vandaag:\n\n"
+
                     for e in today:
                         dt = datetime.fromisoformat(e[3])
                         msg += f"- {e[2]} → {dt.strftime('%H:%M')}\n"
