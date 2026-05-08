@@ -6,8 +6,19 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 # ================= CONFIG ================= #
 
@@ -16,7 +27,7 @@ RENDER_URL = os.getenv("RENDER_URL")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
 PORT = int(os.environ.get("PORT", 10000))
 
-# ================= DATABASE ================= #
+# ================= DB ================= #
 
 conn = sqlite3.connect("agenda.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -68,10 +79,10 @@ def parse(text: str):
 
     for d, idx in weekdays.items():
         if d in text:
-            days_ahead = idx - now.weekday()
-            if days_ahead <= 0:
-                days_ahead += 7
-            event_date = (now + timedelta(days=days_ahead)).date()
+            diff = idx - now.weekday()
+            if diff <= 0:
+                diff += 7
+            event_date = (now + timedelta(days=diff)).date()
             break
 
     if event_date is None:
@@ -85,11 +96,11 @@ def parse(text: str):
     dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=NL_TZ)
 
     title = text
+    for d in weekdays.keys():
+        title = title.replace(d, "")
+
     title = re.sub(r"\d{1,2}:\d{2}", "", title)
     title = re.sub(r"\b\d{1,2}\b", "", title)
-
-    for w in weekdays.keys():
-        title = title.replace(w, "")
 
     for w in ["tomorrow", "morgen", "overmorgen"]:
         title = title.replace(w, "")
@@ -117,14 +128,7 @@ def delete_event(event_id):
     cursor.execute("DELETE FROM events WHERE id=?", (event_id,))
     conn.commit()
 
-def edit_event(event_id, new_title, new_dt):
-    cursor.execute(
-        "UPDATE events SET title=?, event_time=?, reminded=0 WHERE id=?",
-        (new_title, new_dt.isoformat(), event_id),
-    )
-    conn.commit()
-
-# ================= MENU ================= #
+# ================= UI ================= #
 
 def agenda_menu():
     return InlineKeyboardMarkup([
@@ -133,13 +137,20 @@ def agenda_menu():
         [InlineKeyboardButton("🗓 Month", callback_data="month")],
     ])
 
+def event_keyboard(event_id):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("❌ Delete", callback_data=f"del_{event_id}")]
+    ])
+
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📅 Calendar bot active")
 
 async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📂 Choose view:", reply_markup=agenda_menu())
+    await update.message.reply_text("Choose view:", reply_markup=agenda_menu())
+
+# ================= CALLBACKS ================= #
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -147,13 +158,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = q.message.chat.id
     now = datetime.now(NL_TZ)
+
+    data = q.data
+
+    # DELETE EVENT
+    if data.startswith("del_"):
+        event_id = int(data.split("_")[1])
+        delete_event(event_id)
+        await q.message.reply_text("🗑 Event deleted")
+        return
+
     events = get_events(chat_id)
 
-    if q.data == "day":
+    if data == "day":
         filtered = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
         title = "📅 Today"
 
-    elif q.data == "week":
+    elif data == "week":
         filtered = [e for e in events if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)]
         title = "📆 This week"
 
@@ -161,12 +182,23 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
         title = "🗓 This month"
 
+    if not filtered:
+        await q.message.reply_text(f"{title}\n\nNo events")
+        return
+
     msg = f"{title}\n\n"
+
     for e in filtered:
         dt = datetime.fromisoformat(e[3])
-        msg += f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
 
-    await q.message.reply_text(msg if filtered else "No events")
+        msg += (
+            f"📌 {e[2]} → {dt.strftime('%d-%m %H:%M')}\n"
+            f"🆔 /delete {e[0]}\n\n"
+        )
+
+    await q.message.reply_text(msg)
+
+# ================= MESSAGE ================= #
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -179,31 +211,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_event(update.effective_chat.id, title, dt)
 
     await update.message.reply_text(
-        f"✅ Added\n📌 {title}\n🕒 {dt.strftime('%A %d %B %H:%M')}"
+        f"✅ Added\n📌 {title}\n🕒 {dt.strftime('%A %d %B %H:%M')}",
+        reply_markup=event_keyboard(1)
     )
-
-async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        delete_event(int(context.args[0]))
-        await update.message.reply_text("🗑 Deleted")
-    except:
-        await update.message.reply_text("Usage: /delete ID")
-
-async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        event_id = int(context.args[0])
-        text = " ".join(context.args[1:])
-        title, dt = parse(text)
-
-        if not dt:
-            await update.message.reply_text("Invalid format")
-            return
-
-        edit_event(event_id, title, dt)
-        await update.message.reply_text("✏️ Updated")
-
-    except:
-        await update.message.reply_text("Usage: /edit ID new text")
 
 # ================= REMINDERS ================= #
 
@@ -224,76 +234,4 @@ def reminder_loop(app):
                 try:
                     app.bot.send_message(
                         chat_id=e[1],
-                        text=f"🔔 Reminder\n📌 {e[2]}\n🕒 {dt.strftime('%H:%M')}"
-                    )
-
-                    cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
-                    conn.commit()
-
-                except:
-                    pass
-
-        time.sleep(30)
-
-# ================= MORNING SUMMARY ================= #
-
-def morning_loop(app):
-    sent = set()
-
-    while True:
-        now = datetime.now(NL_TZ)
-
-        if now.hour == 8 and now.date() not in sent:
-            cursor.execute("SELECT DISTINCT chat_id FROM events")
-            chats = cursor.fetchall()
-
-            for c in chats:
-                chat_id = c[0]
-                events = get_events(chat_id)
-
-                today = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
-
-                if today:
-                    msg = "🌅 Today:\n\n"
-                    for e in today:
-                        dt = datetime.fromisoformat(e[3])
-                        msg += f"📌 {e[2]} → {dt.strftime('%H:%M')}\n"
-
-                    try:
-                        app.bot.send_message(chat_id=chat_id, text=msg)
-                    except:
-                        pass
-
-            sent.add(now.date())
-
-        time.sleep(60)
-
-# ================= MAIN ================= #
-
-def main():
-    app = Application.builder().token(TOKEN).build()
-
-    app.bot.delete_webhook(drop_pending_updates=True)
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("agenda", agenda))
-    app.add_handler(CommandHandler("delete", delete_cmd))
-    app.add_handler(CommandHandler("edit", edit_cmd))
-
-    app.add_handler(CallbackQueryHandler(button))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    threading.Thread(target=reminder_loop, args=(app,), daemon=True).start()
-    threading.Thread(target=morning_loop, args=(app,), daemon=True).start()
-
-    print("Bot running (V2 FULL)")
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"{RENDER_URL}/{TOKEN}"
-    )
-
-if __name__ == "__main__":
-    main()
+                        text=f"🔔 Reminder\n📌
