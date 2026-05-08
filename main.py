@@ -19,9 +19,9 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 RENDER_URL = os.getenv("RENDER_URL")
 PORT = int(os.environ.get("PORT", 10000))
-NL_TZ = ZoneInfo("Europe/Amsterdam")
+TZ = ZoneInfo("Europe/Amsterdam")
 
-# ================= DB ================= #
+# ================= DATABASE ================= #
 
 conn = sqlite3.connect("agenda.db", check_same_thread=False)
 cursor = conn.cursor()
@@ -51,8 +51,9 @@ WEEKDAYS = {
 
 def parse(text: str):
     raw = text.lower().strip()
-    now = datetime.now(NL_TZ)
+    now = datetime.now(TZ)
 
+    # time parsing
     match = re.search(r"(\d{1,2}):(\d{2})", raw)
     if match:
         hour = int(match.group(1))
@@ -65,6 +66,7 @@ def parse(text: str):
         else:
             return None, None
 
+    # date parsing
     event_date = None
 
     for d, idx in WEEKDAYS.items():
@@ -83,16 +85,9 @@ def parse(text: str):
         else:
             event_date = now.date()
 
-    dt = datetime(
-        event_date.year,
-        event_date.month,
-        event_date.day,
-        hour,
-        minute,
-        tzinfo=NL_TZ
-    )
+    dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=TZ)
 
-    # CLEAN TITLE
+    # CLEAN TITLE (fix duplicates zoals “sunday sunday”)
     title = raw
 
     for d in WEEKDAYS.keys():
@@ -100,14 +95,18 @@ def parse(text: str):
 
     title = re.sub(r"\d{1,2}:\d{2}", "", title)
     title = re.sub(r"\b\d{1,2}\b", "", title)
+
+    for w in ["tomorrow", "morgen", "overmorgen"]:
+        title = title.replace(w, "")
+
     title = re.sub(r"\s+", " ", title).strip()
 
-    if title == "":
+    if not title:
         title = "event"
 
     return title, dt
 
-# ================= DB ================= #
+# ================= DB HELPERS ================= #
 
 def add_event(chat_id, title, dt):
     cursor.execute(
@@ -120,14 +119,39 @@ def get_events(chat_id):
     cursor.execute("SELECT * FROM events WHERE chat_id=? ORDER BY event_time", (chat_id,))
     return cursor.fetchall()
 
-def get_all_chats():
-    cursor.execute("SELECT DISTINCT chat_id FROM events")
-    return cursor.fetchall()
+# ================= CALENDAR UI ================= #
+
+def render_calendar(title, events):
+    if not events:
+        return f"{title}\n\nNo events 📭"
+
+    # group by date
+    grouped = {}
+
+    for e in events:
+        dt = datetime.fromisoformat(e[3])
+        grouped.setdefault(dt.date(), []).append((e, dt))
+
+    grouped = dict(sorted(grouped.items()))
+
+    msg = f"{title}\n\n"
+
+    for day, items in grouped.items():
+        msg += "━━━━━━━━━━━━━━\n"
+        msg += f"📅 {day.strftime('%A %d %B')}\n"
+        msg += "━━━━━━━━━━━━━━\n"
+
+        for e, dt in items:
+            msg += f"🕒 {dt.strftime('%H:%M')}  {e[2]}\n"
+
+        msg += "\n"
+
+    return msg
 
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Calendar bot running")
+    await update.message.reply_text("📅 Google Calendar Bot Running")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -148,64 +172,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= VIEWS ================= #
 
 async def day(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show(update, "day")
+    chat_id = update.effective_chat.id
+    now = datetime.now(TZ)
+
+    events = get_events(chat_id)
+    filtered = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
+
+    msg = render_calendar("📅 Today", filtered)
+    await update.message.reply_text(msg)
 
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show(update, "week")
-
-async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show(update, "month")
-
-async def show(update, mode):
     chat_id = update.effective_chat.id
-    now = datetime.now(NL_TZ)
+    now = datetime.now(TZ)
 
     events = get_events(chat_id)
 
-    if mode == "day":
-        filtered = [e for e in events if datetime.fromisoformat(e[3]).date() == now.date()]
-        title = "📅 Today"
+    filtered = [
+        e for e in events
+        if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
+    ]
 
-    elif mode == "week":
-        filtered = [
-            e for e in events
-            if now.date() <= datetime.fromisoformat(e[3]).date() <= now.date() + timedelta(days=7)
-        ]
-        title = "📆 This week"
-
-    else:
-        filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
-        title = "🗓 This month"
-
-    if not filtered:
-        await update.message.reply_text(title + "\n\nNo events")
-        return
-
-    msg = title + "\n\n"
-
-    for e in filtered:
-        dt = datetime.fromisoformat(e[3])
-        msg += "📌 " + e[2] + " → " + dt.strftime("%d-%m %H:%M") + "\n"
-
+    msg = render_calendar("📆 This Week", filtered)
     await update.message.reply_text(msg)
 
-# ================= MORNING SUMMARY ================= #
+async def month(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    now = datetime.now(TZ)
 
-async def morning_summary(app):
+    events = get_events(chat_id)
+
+    filtered = [
+        e for e in events
+        if datetime.fromisoformat(e[3]).month == now.month
+    ]
+
+    msg = render_calendar("🗓 This Month", filtered)
+    await update.message.reply_text(msg)
+
+# ================= MORNING DIGEST ================= #
+
+async def morning_digest(app: Application):
     while True:
-        now = datetime.now(NL_TZ)
+        now = datetime.now(TZ)
 
         if now.hour == 8 and now.minute == 0:
-            chats = get_all_chats()
+            cursor.execute("SELECT DISTINCT chat_id FROM events")
+            chats = cursor.fetchall()
 
             for c in chats:
                 chat_id = c[0]
 
-                cursor.execute(
-                    "SELECT * FROM events WHERE chat_id=?",
-                    (chat_id,)
-                )
-                events = cursor.fetchall()
+                events = get_events(chat_id)
 
                 today = [
                     e for e in events
@@ -213,11 +230,8 @@ async def morning_summary(app):
                 ]
 
                 if today:
-                    msg = "🌅 Today’s schedule:\n\n"
-
-                    for e in today:
-                        dt = datetime.fromisoformat(e[3])
-                        msg += "📌 " + e[2] + " → " + dt.strftime("%H:%M") + "\n"
+                    msg = "🌅 Today’s Agenda\n\n"
+                    msg += render_calendar("", today)
 
                     try:
                         await app.bot.send_message(chat_id=chat_id, text=msg)
@@ -226,7 +240,7 @@ async def morning_summary(app):
 
         await asyncio.sleep(60)
 
-# ================= MAIN ================= #
+# ================= MAIN (WEBHOOK SAFE) ================= #
 
 def main():
     app = Application.builder().token(TOKEN).build()
@@ -237,10 +251,9 @@ def main():
     app.add_handler(CommandHandler("month", month))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # background task (NO job_queue, NO threads)
-    asyncio.get_event_loop().create_task(morning_summary(app))
+    asyncio.get_event_loop().create_task(morning_digest(app))
 
-    print("Bot running with MORNING SUMMARY")
+    print("Google Calendar Bot Running (Webhook Mode)")
 
     app.run_webhook(
         listen="0.0.0.0",
