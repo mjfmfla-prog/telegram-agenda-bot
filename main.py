@@ -1,6 +1,7 @@
 import os
 import re
 import sqlite3
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -17,10 +18,9 @@ from telegram.ext import (
 # ================= CONFIG ================= #
 
 TOKEN = os.getenv("TOKEN")
-NL_TZ = ZoneInfo("Europe/Amsterdam")
-
-# Render provides PORT but we DON'T need webhook anymore in this stable version
+RENDER_URL = os.getenv("RENDER_URL")  # https://your-app.onrender.com
 PORT = int(os.environ.get("PORT", 10000))
+NL_TZ = ZoneInfo("Europe/Amsterdam")
 
 # ================= DB ================= #
 
@@ -125,12 +125,12 @@ def agenda_menu():
 # ================= COMMANDS ================= #
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📅 Calendar bot is running")
+    await update.message.reply_text("📅 Bot running (webhook mode)")
 
 async def agenda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Choose view:", reply_markup=agenda_menu())
 
-# ================= CALLBACKS (FIXED CORE) ================= #
+# ================= CALLBACKS ================= #
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -160,10 +160,6 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         filtered = [e for e in events if datetime.fromisoformat(e[3]).month == now.month]
         title = "🗓 This month"
 
-    if not filtered:
-        await q.message.reply_text(title + "\n\nNo events")
-        return
-
     msg = title + "\n\n"
 
     for e in filtered:
@@ -190,49 +186,59 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Added\n📌 " + title + "\n🕒 " + dt.strftime("%A %d %B %H:%M")
     )
 
-# ================= SCHEDULER (NO THREADS) ================= #
+# ================= CUSTOM SCHEDULER (NO JOBQUEUE) ================= #
 
-async def reminder_job(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(NL_TZ)
+async def reminder_loop(app):
+    while True:
+        now = datetime.now(NL_TZ)
 
-    cursor.execute("SELECT * FROM events")
-    events = cursor.fetchall()
+        cursor.execute("SELECT * FROM events")
+        events = cursor.fetchall()
 
-    for e in events:
-        if e[4]:
-            continue
+        for e in events:
+            if e[4]:
+                continue
 
-        dt = datetime.fromisoformat(e[3])
+            dt = datetime.fromisoformat(e[3])
 
-        if now >= dt - timedelta(minutes=15):
-            try:
-                await context.bot.send_message(
-                    chat_id=e[1],
-                    text="🔔 Reminder\n📌 " + e[2] + "\n🕒 " + dt.strftime("%H:%M")
-                )
+            if now >= dt - timedelta(minutes=15):
+                try:
+                    await app.bot.send_message(
+                        chat_id=e[1],
+                        text="🔔 Reminder\n📌 " + e[2] + "\n🕒 " + dt.strftime("%H:%M")
+                    )
 
-                cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
-                conn.commit()
-            except:
-                pass
+                    cursor.execute("UPDATE events SET reminded=1 WHERE id=?", (e[0],))
+                    conn.commit()
 
-# ================= MAIN ================= #
+                except:
+                    pass
 
-def main():
+        await asyncio.sleep(30)
+
+# ================= MAIN (WEBHOOK FIXED) ================= #
+
+async def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("agenda", agenda))
-
     app.add_handler(CallbackQueryHandler(button))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # stable job queue instead of threads
-    app.job_queue.run_repeating(reminder_job, interval=30, first=10)
+    # start background task safely (NO job_queue)
+    asyncio.create_task(reminder_loop(app))
 
-    print("Bot running V5 stable")
+    print("Bot running WEBHOOK SAFE MODE")
 
-    app.run_polling()
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{RENDER_URL}/{TOKEN}",
+        drop_pending_updates=True
+    )
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())
