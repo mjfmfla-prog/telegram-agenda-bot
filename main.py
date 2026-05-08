@@ -21,10 +21,9 @@ from telegram.ext import (
 
 TOKEN = os.getenv("TOKEN")
 NL_TZ = ZoneInfo("Europe/Amsterdam")
-
 PORT = int(os.environ.get("PORT", 10000))
 
-# ---------------- KEEP ALIVE (RENDER FIX) ---------------- #
+# ---------------- KEEP ALIVE (Render fix) ---------------- #
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -53,23 +52,24 @@ CREATE TABLE IF NOT EXISTS events (
 """)
 conn.commit()
 
-# ---------------- FIXED PARSER ---------------- #
+# ---------------- FIXED ROBUST PARSER ---------------- #
 
 def parse(text: str):
     text = text.lower()
     now = datetime.now(NL_TZ)
 
-    # TIME
-    time_match = re.search(r"(\d{1,2}:\d{2})", text)
+    # TIME detection (robust)
+    time_match = re.search(r"\b(\d{1,2}:\d{2})\b", text)
     if not time_match:
         return None, None
 
     try:
-        t = datetime.strptime(time_match.group(1), "%H:%M").time()
+        hour, minute = map(int, time_match.group(1).split(":"))
+        t = datetime(now.year, now.month, now.day, hour, minute).time()
     except:
         return None, None
 
-    # DATE
+    # DATE handling
     date = now
 
     if "tomorrow" in text:
@@ -79,10 +79,12 @@ def parse(text: str):
 
     dt = datetime.combine(date.date(), t).replace(tzinfo=NL_TZ)
 
-    # TITLE CLEANUP
+    # TITLE cleanup
     title = text
-    title = title.replace("tomorrow", "").replace("today", "")
-    title = re.sub(r"\d{1,2}:\d{2}", "", title).strip()
+    title = title.replace("tomorrow", "")
+    title = title.replace("today", "")
+    title = re.sub(r"\b\d{1,2}:\d{2}\b", "", title)
+    title = title.strip()
 
     if not title:
         title = "event"
@@ -153,7 +155,7 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await q.message.reply_text(msg or "Geen events")
 
-# ---------------- TEXT INPUT ---------------- #
+# ---------------- MESSAGE INPUT ---------------- #
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -227,7 +229,7 @@ def reminder_loop(app):
         events = cursor.fetchall()
 
         for e in events:
-            if e[4]:  # reminded
+            if e[4]:
                 continue
 
             dt = datetime.fromisoformat(e[3])
