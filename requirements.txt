@@ -1,3 +1,5 @@
 python-telegram-bot==21.6
 python-telegram-bot[all]==21.6
 python-telegram-bot[webhooks]==21.6
+python-telegram-bot[webhooks]==21.6
+flask
