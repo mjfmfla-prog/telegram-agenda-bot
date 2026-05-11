@@ -3,8 +3,6 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from threading import Thread
-from flask import Flask
 
 from telegram import Update
 from telegram.ext import (
@@ -14,17 +12,6 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-
-# ================= HEALTH ROUTE ================= #
-
-health_app = Flask(__name__)
-
-@health_app.route("/")
-def home():
-    return "Bot alive"
-
-def run_health():
-    health_app.run(host="0.0.0.0", port=8080)
 
 # ================= CONFIG ================= #
 
@@ -226,7 +213,6 @@ def add_event(chat_id, title, dt):
     )
     conn.commit()
 
-
 def get_events(chat_id):
     cursor.execute(
         "SELECT * FROM events WHERE chat_id=? ORDER BY event_time",
@@ -234,11 +220,9 @@ def get_events(chat_id):
     )
     return cursor.fetchall()
 
-
 def delete_event(event_id):
     cursor.execute("DELETE FROM events WHERE id=?", (event_id,))
     conn.commit()
-
 
 def edit_event(event_id, title, dt):
     cursor.execute(
@@ -396,9 +380,6 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN ================= #
 
 def main():
-    # START HEALTH SERVER
-    Thread(target=run_health).start()
-
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("day", day))
@@ -412,7 +393,7 @@ def main():
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle)
     )
 
-    print("Calendar bot v8 running")
+    print("Calendar bot running")
 
     app.run_webhook(
         listen="0.0.0.0",
