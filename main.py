@@ -3,6 +3,8 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from threading import Thread
+from flask import Flask
 
 from telegram import Update
 from telegram.ext import (
@@ -12,6 +14,17 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+
+# ================= HEALTH ROUTE ================= #
+
+health_app = Flask(__name__)
+
+@health_app.route("/")
+def home():
+    return "Bot alive"
+
+def run_health():
+    health_app.run(host="0.0.0.0", port=8080)
 
 # ================= CONFIG ================= #
 
@@ -383,6 +396,9 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= MAIN ================= #
 
 def main():
+    # START HEALTH SERVER
+    Thread(target=run_health).start()
+
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("day", day))
